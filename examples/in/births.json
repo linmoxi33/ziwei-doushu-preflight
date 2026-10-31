@@ -1,0 +1,6 @@
+[
+  {"year": 1990, "month": 5, "day": 20, "hour": 5, "gender": "male", "city": "上海市"},
+  {"year": 1992, "month": 8, "day": 3, "hour": 6, "gender": "M", "longitude": 87.6,
+   "origInput": {"year": 1992, "month": 8, "day": 3, "clockHour": 11, "clockMinute": 50}},
+  {"year": 2026, "month": 2, "day": 30, "hour": 2, "gender": "female"}
+]

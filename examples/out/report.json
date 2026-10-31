@@ -1,0 +1,41 @@
+{
+  "tool": "ziwei-preflight",
+  "version": "0.1.0",
+  "upstream": "https://github.com/Renhuai123/ziwei-doushu",
+  "records": 3,
+  "summary": {
+    "errors": 3,
+    "warnings": 1,
+    "clean": 0
+  },
+  "findings": [
+    {
+      "code": "W_CITY_WITHOUT_LONGITUDE",
+      "severity": "warning",
+      "record": 0,
+      "field": "longitude",
+      "message": "birthplace given without longitude; the engine cannot correct true solar time"
+    },
+    {
+      "code": "E_GENDER_COERCED",
+      "severity": "error",
+      "record": 1,
+      "field": "gender",
+      "message": "gender='M' is silently charted as 女; algorithm.ts:461 is `gender === 'male' ? '男' : '女'`"
+    },
+    {
+      "code": "E_LONGITUDE_CHANGES_BRANCH",
+      "severity": "error",
+      "record": 1,
+      "field": "longitude",
+      "message": "longitude is dropped by generateChart() (algorithm.ts:448), but true-solar correction -130 min moves 午时 -> 巳时; the chart is computed for the wrong branch"
+    },
+    {
+      "code": "E_DATE_NOT_EXIST",
+      "severity": "error",
+      "record": 2,
+      "field": "day",
+      "message": "solar date 2026-02-30 does not exist; generateChart() throws RangeError"
+    }
+  ]
+}

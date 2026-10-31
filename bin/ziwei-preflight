@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""ziwei-preflight: predict what ziwei-doushu's generateChart() silently does to a birth input.
+
+Offline, zero-dependency. Encodes only behaviour that is observable in upstream source
+(lib/ziwei/algorithm.ts) and documented upstream limitations.
+"""
+import json
+import sys
+
+TOOL = "ziwei-preflight"
+VERSION = "0.1.0"
+UPSTREAM = "https://github.com/Renhuai123/ziwei-doushu"
+
+# BirthInfo keys (lib/ziwei/types.ts). Anything else is dropped by the engine.
+ALLOWED = {"year", "month", "day", "hour", "gender", "name", "province", "city",
+           "longitude", "origInput", "leapMonthPolicy"}
+BRANCHES = ["子", "丑", "寅", "卯", "辰", "巳", "午", "未", "申", "酉", "戌", "亥"]
+# Mainland China DST windows, copied from lib/ziwei/dst-cn.ts XLS_CN rows (inclusive).
+DST_WINDOWS = {
+    1986: ((5, 4), (9, 14)), 1987: ((4, 12), (9, 13)), 1988: ((4, 10), (9, 11)),
+    1989: ((4, 16), (9, 17)), 1990: ((4, 15), (9, 16)), 1991: ((4, 14), (9, 15)),
+}
+
+
+def branch_of_clock(hour, minute):
+    return ((hour + 1) // 2) % 12
+
+
+def days_in_month(y, m):
+    if m == 2:
+        return 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28
+    return 30 if m in (4, 6, 9, 11) else 31
+
+
+def add_finding(out, code, severity, record, field, message):
+    out.append({"code": code, "severity": severity, "record": record,
+                "field": field, "message": message})
+
+
+def check_record(rec, idx, out):
+    if not isinstance(rec, dict):
+        add_finding(out, "E_RECORD_TYPE", "error", idx, None,
+                    "record is not a JSON object; generateChart() needs an object")
+        return
+    for key in rec:
+        if key not in ALLOWED:
+            add_finding(out, "W_UNKNOWN_FIELD", "warning", idx, key,
+                        "field is not part of BirthInfo; the engine ignores it")
+
+    year, month, day = rec.get("year"), rec.get("month"), rec.get("day")
+    date_ok = True
+    for name, val in (("year", year), ("month", month), ("day", day)):
+        if not isinstance(val, int) or isinstance(val, bool):
+            add_finding(out, "E_DATE_TYPE", "error", idx, name,
+                        "%s must be an integer; generateChart() throws RangeError" % name)
+            date_ok = False
+    if date_ok:
+        if not (1 <= month <= 12) or not (1 <= day <= days_in_month(year, month)):
+            add_finding(out, "E_DATE_NOT_EXIST", "error", idx, "day",
+                        "solar date %04d-%02d-%02d does not exist; generateChart() throws RangeError"
+                        % (year, month, day))
+            date_ok = False
+
+    hour = rec.get("hour")
+    if not isinstance(hour, int) or isinstance(hour, bool) or not (0 <= hour <= 11):
+        add_finding(out, "E_HOUR_RANGE", "error", idx, "hour",
+                    "hour must be an integer branch index 0-11 (not a clock hour); "
+                    "generateChart() throws RangeError")
+
+    gender = rec.get("gender")
+    if "gender" not in rec:
+        add_finding(out, "E_GENDER_MISSING", "error", idx, "gender",
+                    "gender is absent; algorithm.ts:461 coerces anything != 'male' to 女")
+    elif gender not in ("male", "female"):
+        add_finding(out, "E_GENDER_COERCED", "error", idx, "gender",
+                    "gender=%r is silently charted as 女; algorithm.ts:461 is "
+                    "`gender === 'male' ? '男' : '女'`" % (gender,))
+
+    lon = rec.get("longitude")
+    if lon is not None:
+        if not isinstance(lon, (int, float)) or isinstance(lon, bool) or not (-180 <= lon <= 180):
+            add_finding(out, "E_LONGITUDE_RANGE", "error", idx, "longitude",
+                        "longitude must be a number in [-180, 180]")
+        else:
+            orig = rec.get("origInput")
+            crossed = None
+            if isinstance(orig, dict):
+                ch, cm = orig.get("clockHour"), orig.get("clockMinute")
+                if isinstance(ch, int) and isinstance(cm, int) and 0 <= ch <= 23 and 0 <= cm <= 59:
+                    delta = (lon - 120.0) * 4.0
+                    total = ch * 60 + cm + delta
+                    if 0 <= total < 24 * 60:
+                        nb = branch_of_clock(int(total // 60), int(total % 60))
+                        ob = branch_of_clock(ch, cm)
+                        if nb != ob:
+                            crossed = (ob, nb, delta)
+            if crossed:
+                ob, nb, delta = crossed
+                add_finding(out, "E_LONGITUDE_CHANGES_BRANCH", "error", idx, "longitude",
+                            "longitude is dropped by generateChart() (algorithm.ts:448), but "
+                            "true-solar correction %+.0f min moves %s时 -> %s时; the chart is "
+                            "computed for the wrong branch" % (delta, BRANCHES[ob], BRANCHES[nb]))
+            else:
+                add_finding(out, "W_LONGITUDE_IGNORED", "warning", idx, "longitude",
+                            "longitude is present but generateChart() never reads it "
+                            "(algorithm.ts:448); no true-solar correction is applied")
+    elif rec.get("city") or rec.get("province"):
+        add_finding(out, "W_CITY_WITHOUT_LONGITUDE", "warning", idx, "longitude",
+                    "birthplace given without longitude; the engine cannot correct true solar time")
+
+    orig = rec.get("origInput")
+    if isinstance(orig, dict) and date_ok:
+        oy, om, od = orig.get("year"), orig.get("month"), orig.get("day")
+        win = DST_WINDOWS.get(oy)
+        if win and isinstance(om, int) and isinstance(od, int):
+            if (om, od) >= win[0] and (om, od) <= win[1]:
+                add_finding(out, "W_DST_WINDOW", "warning", idx, "origInput",
+                            "clock reading falls in the %d China DST window; the engine only "
+                            "detects it (dst-cn.ts) and never subtracts the hour automatically" % oy)
+
+
+def load_records(path):
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    if path.endswith(".jsonl"):
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+    data = json.loads(text)
+    return data if isinstance(data, list) else [data]
+
+
+def main(argv):
+    as_json = "--json" in argv
+    files = [a for a in argv if not a.startswith("-")]
+    if "--help" in argv or "-h" in argv:
+        print("usage: ziwei-preflight [--json] <births.json|births.jsonl> [...]")
+        return 0
+    if not files:
+        print("usage: ziwei-preflight [--json] <births.json|births.jsonl> [...]", file=sys.stderr)
+        return 2
+    records, findings = [], []
+    for path in files:
+        try:
+            loaded = load_records(path)
+        except (OSError, ValueError) as exc:
+            print("input error: %s: %s" % (path, exc), file=sys.stderr)
+            return 2
+        for rec in loaded:
+            check_record(rec, len(records), findings)
+            records.append(rec)
+    errors = sum(1 for f in findings if f["severity"] == "error")
+    warnings = len(findings) - errors
+    report = {"tool": TOOL, "version": VERSION, "upstream": UPSTREAM,
+              "records": len(records),
+              "summary": {"errors": errors, "warnings": warnings,
+                          "clean": len(records) - len({f["record"] for f in findings})},
+              "findings": findings}
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for f in findings:
+            print("record %d | %s %s | %s | %s" % (f["record"], f["severity"].upper(),
+                  f["code"], f["field"], f["message"]))
+        print("%d record(s): %d error(s), %d warning(s)" % (len(records), errors, warnings))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
